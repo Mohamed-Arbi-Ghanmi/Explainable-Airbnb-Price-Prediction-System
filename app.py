@@ -6,8 +6,26 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 import re
+import altair as alt
 
 st.set_page_config(page_title="Airbnb Barcelona Price Predictor", layout="wide")
+
+st.markdown(
+    """
+    <style>
+      /* Make tabs bigger */
+      button[data-baseweb="tab"] {
+        font-size: 20px;
+        padding: 12px 18px;
+      }
+      /* Make tab list a bit taller */
+      div[data-baseweb="tab-list"] {
+        gap: 6px;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # -------------------------
 # Utils
@@ -84,9 +102,15 @@ def safe_median(series: pd.Series, fallback: float):
         return float(fallback)
 
 # -------------------------
-# Local explanation fallback (sensitivity)
+# Local explanation (what-if sensitivity) — SHAP replacement
 # -------------------------
 def local_sensitivity(model, X_one: pd.DataFrame, features: list) -> pd.DataFrame:
+    """
+    Local price decomposition via what-if perturbation:
+    - Slightly increase each numeric feature
+    - Measure change in predicted price (€)
+    - Convert to % contribution based on absolute effects
+    """
     base_log = float(model.predict(X_one)[0])
     base_price = float(np.expm1(base_log))
 
@@ -95,51 +119,27 @@ def local_sensitivity(model, X_one: pd.DataFrame, features: list) -> pd.DataFram
         if f not in X_one.columns:
             continue
         if pd.api.types.is_numeric_dtype(X_one[f]):
-            x2 = X_one.copy()
-            x = float(x2[f].iloc[0]) if pd.notna(x2[f].iloc[0]) else 0.0
-            delta = max(abs(x) * 0.10, 1.0)  # +10% or +1
-            x2[f] = x + delta
-            p2 = float(np.expm1(model.predict(x2)[0]))
-            effects.append((f, p2 - base_price))
+            x = float(X_one[f].iloc[0]) if pd.notna(X_one[f].iloc[0]) else 0.0
 
-    out = pd.DataFrame(effects, columns=["feature", "delta_price_eur"])
+            # Adaptive perturbation: +10% or +1 (whichever larger)
+            delta = max(abs(x) * 0.10, 1.0)
+
+            x2 = X_one.copy()
+            x2[f] = x + delta
+
+            p2 = float(np.expm1(model.predict(x2)[0]))
+            effects.append({"feature": f, "delta_price_eur": p2 - base_price})
+
+    out = pd.DataFrame(effects)
     if out.empty:
         return out
 
-    out["abs_delta"] = out["delta_price_eur"].abs()
-    out = out.sort_values("abs_delta", ascending=False).drop(columns=["abs_delta"])
-    total = out["delta_price_eur"].abs().sum()
-    out["contribution_pct"] = 100 * out["delta_price_eur"].abs() / (total if total != 0 else 1.0)
+    out["abs"] = out["delta_price_eur"].abs()
+    total = out["abs"].sum() if out["abs"].sum() != 0 else 1.0
+    out["contribution_pct"] = 100 * out["abs"] / total
+    out["direction"] = np.where(out["delta_price_eur"] >= 0, "Increase ↑", "Decrease ↓")
+    out = out.sort_values("abs", ascending=False).drop(columns=["abs"])
     return out
-
-# -------------------------
-# SHAP local explanation (preferred)
-# -------------------------
-@st.cache_resource
-def get_shap_explainer(pipeline_model, background_df: pd.DataFrame):
-    """
-    Cache a SHAP explainer. If SHAP fails, this will raise and we'll fallback.
-    Uses shap.Explainer (auto) on pipeline_model.predict.
-    """
-    import shap  # only import if available
-    # shap.Explainer can work with callable predict + background
-    explainer = shap.Explainer(pipeline_model.predict, background_df)
-    return explainer
-
-def try_shap_explain(model, X_one: pd.DataFrame, background_df: pd.DataFrame):
-    """
-    Returns (ok, fig_or_none, error_or_none)
-    """
-    try:
-        import shap
-        explainer = get_shap_explainer(model, background_df)
-        sv = explainer(X_one)
-
-        # Waterfall plot -> matplotlib figure
-        fig = shap.plots.waterfall(sv[0], show=False)
-        return True, fig, None
-    except Exception as e:
-        return False, None, str(e)
 
 # -------------------------
 # Load assets
@@ -174,7 +174,7 @@ st.caption("Predict nightly price, explore city price patterns, and explain each
 # -------------------------
 # Load everything
 # -------------------------
-df = load_data("listings.csv")  # adjust if gz
+df = load_data("listings.csv")
 meta = load_meta()
 model = load_model()
 imp_df = load_importance()
@@ -283,7 +283,6 @@ else:
         has_availability = st.sidebar.selectbox("Has availability", ["t", "f"])
         host_response_time = st.sidebar.selectbox("Host response time", resp_time_options) if resp_time_options else None
 
-    # If expander not opened, define defaults
     if "instant_bookable" not in locals():
         instant_bookable = "t"
         host_is_superhost = "f"
@@ -307,7 +306,7 @@ else:
         "maximum_nights": maximum_nights,
         "amenities_count": amenities_count_val,
 
-        # auto-filled (not user-entered)
+        # auto-filled
         "number_of_reviews": defaults["number_of_reviews"],
         "reviews_per_month": defaults["reviews_per_month"],
         "review_scores_rating": defaults["review_scores_rating"],
@@ -345,9 +344,13 @@ with tab_predict:
         pred_log = float(model.predict(X_one)[0])
         pred_price = float(np.expm1(pred_log))
 
-        c1, c2 = st.columns([1, 1])
+        # compute explanation ONCE
+        expl = local_sensitivity(model, X_one, meta["features"]).head(12)
 
-        with c1:
+        # -------- ROW 1: Prediction | Donut --------
+        r1c1, r1c2 = st.columns([1, 1])
+
+        with r1c1:
             st.subheader("Prediction")
             st.metric("Predicted nightly price", f"€{pred_price:,.2f}")
 
@@ -364,38 +367,74 @@ with tab_predict:
                 else:
                     st.success(f"Fairly priced ({pct_diff:.1f}%)")
 
-        with c2:
-            st.subheader("Why this price? (local explanation)")
-
-            # Build background for SHAP (small & cached-like)
-            bg = df_feat.copy()
-            bg = bg.dropna(subset=["latitude", "longitude"])
-            bg = bg.sample(min(150, len(bg)), random_state=42)
-            bg = engineer_features(bg)
-            bg = bg.reindex(columns=meta["features"], fill_value=np.nan)
-
-            # Try SHAP waterfall, fallback to sensitivity
-            ok, fig, err = try_shap_explain(model, X_one, bg)
-
-            if ok:
-                st.pyplot(fig)
-                st.caption("SHAP waterfall shows how features push the prediction up/down from a baseline.")
+        with r1c2:
+            st.subheader("Contribution share (%)")
+            if expl.empty:
+                st.info("No numeric features available.")
             else:
-                expl = local_sensitivity(model, X_one, meta["features"]).head(12)
-                if expl.empty:
-                    st.info("No numeric features found for local explanation.")
-                else:
-                    show = expl.copy()
-                    show["delta_price_eur"] = show["delta_price_eur"].map(lambda x: f"{x:+.2f}")
-                    show["contribution_pct"] = show["contribution_pct"].map(lambda x: f"{x:.1f}%")
-                    st.dataframe(show, use_container_width=True)
+                donut_df = expl.copy()
+                donut_df["contribution_pct"] = donut_df["contribution_pct"].round(1)
 
-                    chart = expl.sort_values("delta_price_eur").set_index("feature")["delta_price_eur"]
-                    st.bar_chart(chart)
+                donut = alt.Chart(donut_df).mark_arc(innerRadius=60).encode(
+                    theta=alt.Theta("contribution_pct:Q"),
+                    color=alt.Color("feature:N", legend=alt.Legend(title="Feature")),
+                    tooltip=[
+                        alt.Tooltip("feature:N"),
+                        alt.Tooltip("contribution_pct:Q", format=".1f", title="Contribution (%)"),
+                        alt.Tooltip("delta_price_eur:Q", format="+.2f", title="Δ price (€)")
+                    ]
+                ).properties(height=320)
 
-                with st.expander("Why not SHAP here?"):
-                    st.write("SHAP failed in this environment for the pipeline model. Fallback explanation is a sensitivity-style approximation.")
-                    st.code(err if err else "Unknown SHAP error")
+                st.altair_chart(donut, use_container_width=True)
+
+        st.divider()
+
+        # -------- ROW 2: Bar | Table --------
+        r2c1, r2c2 = st.columns([1.25, 1])
+
+        with r2c1:
+            st.subheader("Impact on predicted price (€)")
+            if expl.empty:
+                st.info("No numeric features available.")
+            else:
+                bar_df = expl.copy()
+                bar_df["impact_sign"] = np.where(bar_df["delta_price_eur"] >= 0, "Push ↑", "Push ↓")
+                bar_df = bar_df.sort_values("delta_price_eur")
+
+                bar = alt.Chart(bar_df).mark_bar().encode(
+                    x=alt.X("delta_price_eur:Q", title="Δ Predicted price (€) when feature is increased"),
+                    y=alt.Y("feature:N", sort=None, title=""),
+                    color=alt.Color("impact_sign:N", legend=alt.Legend(title="Effect")),
+                    tooltip=[
+                        alt.Tooltip("feature:N"),
+                        alt.Tooltip("delta_price_eur:Q", format="+.2f", title="Δ price (€)"),
+                        alt.Tooltip("contribution_pct:Q", format=".1f", title="Contribution (%)")
+                    ]
+                ).properties(height=360)
+
+                zero_line = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule().encode(x="x:Q")
+                st.altair_chart(bar + zero_line, use_container_width=True)
+
+        with r2c2:
+            st.subheader("Top local drivers")
+            if expl.empty:
+                st.info("No numeric features available.")
+            else:
+                table_df = expl.copy()
+                table_df["delta_price_eur"] = table_df["delta_price_eur"].map(lambda x: f"{x:+.2f} €")
+                table_df["contribution_pct"] = table_df["contribution_pct"].map(lambda x: f"{x:.1f}%")
+
+                st.dataframe(
+                    table_df[["feature", "direction", "delta_price_eur", "contribution_pct"]],
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+        st.caption(
+            "Local explanation = what-if analysis: we slightly increase each numeric feature (10% or +1) and observe how the prediction changes."
+        )
+
+
 
 # -------------------------
 # Map tab
@@ -437,27 +476,77 @@ with tab_map:
             icon=folium.Icon(color="red")
         ).add_to(m)
 
-    # IMPORTANT: stable key fixes "blank map in tabs" issues
     st_folium(m, width=1100, height=600, key="map_main")
 
 # -------------------------
-# Analysis tab
+# Analysis tab (VARIED charts + neighborhood chart restored)
 # -------------------------
 with tab_analysis:
-    st.subheader("Global model insights")
+    st.subheader("Market & Model Analysis")
 
-    # 1) Global drivers as chart (not just table)
-    if imp_df is not None and "importance_pct" in imp_df.columns:
-        top = imp_df.sort_values("importance_pct", ascending=False).head(15)
-        st.markdown("### Top global drivers (Permutation Importance %)")
-        st.bar_chart(top["importance_pct"])
+    # ---- 1) Price distribution (Histogram) ----
+    st.markdown("### Price distribution (nightly €)")
+    price_plot = df_feat.dropna(subset=["price_num"]).copy()
+    price_plot = price_plot[price_plot["price_num"] > 0]
+    price_plot["price_clip"] = price_plot["price_num"].clip(upper=500)
 
-        with st.expander("Show raw importance table"):
-            st.dataframe(top, use_container_width=True)
+    hist = alt.Chart(price_plot).mark_bar().encode(
+        x=alt.X("price_clip:Q", bin=alt.Bin(maxbins=60), title="Nightly price (€) (clipped at 500)"),
+        y=alt.Y("count()", title="Listings")
+    ).properties(height=300)
+    st.altair_chart(hist, use_container_width=True)
+
+    # ---- 2) Boxplot by room type ----
+    if "room_type" in df_feat.columns:
+        st.markdown("### Price by room type (boxplot)")
+        box_df = df_feat.dropna(subset=["price_num", "room_type"]).copy()
+        box_df["price_clip"] = box_df["price_num"].clip(upper=500)
+
+        box = alt.Chart(box_df).mark_boxplot().encode(
+            x=alt.X("room_type:N", title="Room type"),
+            y=alt.Y("price_clip:Q", title="Nightly price (€) (clipped at 500)")
+        ).properties(height=320)
+        st.altair_chart(box, use_container_width=True)
+
+    # ---- 3) Scatter: distance to center vs price ----
+    if "dist_to_center_km" in df_feat.columns:
+        st.markdown("### Price vs distance to city center")
+        sc = df_feat.dropna(subset=["price_num", "dist_to_center_km"]).copy()
+        sc["price_clip"] = sc["price_num"].clip(upper=500)
+        sc = sc.sample(min(4000, len(sc)), random_state=42)
+
+        scatter = alt.Chart(sc).mark_circle(opacity=0.25).encode(
+            x=alt.X("dist_to_center_km:Q", title="Distance to center (km)"),
+            y=alt.Y("price_clip:Q", title="Nightly price (€) (clipped at 500)"),
+            tooltip=["neighbourhood_cleansed", "room_type", "price_num", "dist_to_center_km"]
+        ).properties(height=320)
+        st.altair_chart(scatter, use_container_width=True)
+
+    # ---- 4) Correlation heatmap (numeric features) ----
+    st.markdown("### Correlation heatmap (numeric features)")
+    num_cols = [c for c in df_feat.columns if pd.api.types.is_numeric_dtype(df_feat[c])]
+    keep = [c for c in [
+        "price_num", "accommodates", "bedrooms", "beds", "bathrooms_num",
+        "amenities_count", "dist_to_center_km", "dist_to_beach_km",
+        "availability_30", "availability_90", "number_of_reviews", "reviews_per_month",
+        "review_scores_rating"
+    ] if c in num_cols]
+
+    if len(keep) >= 4:
+        corr = df_feat[keep].corr().stack().reset_index()
+        corr.columns = ["x", "y", "corr"]
+
+        heat = alt.Chart(corr).mark_rect().encode(
+            x=alt.X("x:N", title=""),
+            y=alt.Y("y:N", title=""),
+            color=alt.Color("corr:Q", title="corr", scale=alt.Scale(domain=[-1, 1])),
+            tooltip=["x", "y", "corr"]
+        ).properties(height=420)
+        st.altair_chart(heat, use_container_width=True)
     else:
-        st.info("Export `permutation_importance.csv` from the notebook to show global drivers here.")
+        st.info("Not enough numeric features available for correlation heatmap.")
 
-    # 2) Neighborhood median prices as chart
+    # ---- 5) ✅ Neighborhood median prices (RESTORED) ----
     st.markdown("### Neighborhood median prices (from dataset)")
     if "price_num" in df_feat.columns and "neighbourhood_cleansed" in df_feat.columns:
         nb = (
@@ -466,10 +555,34 @@ with tab_analysis:
                   .median()
                   .sort_values(ascending=False)
         )
-        nb_top = nb.head(15)
-        st.bar_chart(nb_top)
+        nb_top = nb.head(15).reset_index()
+        nb_top.columns = ["neighbourhood_cleansed", "median_price_eur"]
 
-        with st.expander("Show raw neighbourhood table"):
-            st.dataframe(nb_top.to_frame("median_price_eur"), use_container_width=True)
+        nb_chart = alt.Chart(nb_top).mark_bar().encode(
+            x=alt.X("median_price_eur:Q", title="Median nightly price (€)"),
+            y=alt.Y("neighbourhood_cleansed:N", sort="-x", title="Neighbourhood"),
+            tooltip=["neighbourhood_cleansed", "median_price_eur"]
+        ).properties(height=420)
+
+        st.altair_chart(nb_chart, use_container_width=True)
     else:
-        st.info("Neighborhood analysis requires `price` to be parsed correctly.")
+        st.info("Neighborhood analysis requires parsed `price` and `neighbourhood_cleansed`.")
+
+    # ---- 6) Global drivers (Permutation Importance %) ----
+    st.markdown("### Global drivers (Permutation Importance %)")
+    if imp_df is not None and "importance_pct" in imp_df.columns:
+        top = imp_df.sort_values("importance_pct", ascending=False).head(15).copy()
+        top = top.reset_index().rename(columns={"index": "feature"})
+
+        imp_chart = alt.Chart(top).mark_bar().encode(
+            x=alt.X("importance_pct:Q", title="Importance (%)"),
+            y=alt.Y("feature:N", sort="-x", title="Feature"),
+            tooltip=["feature", "importance_pct"]
+        ).properties(height=420)
+
+        st.altair_chart(imp_chart, use_container_width=True)
+
+        with st.expander("Show raw importance table"):
+            st.dataframe(top, use_container_width=True)
+    else:
+        st.info("Export `permutation_importance.csv` from the notebook to show global drivers here.")
