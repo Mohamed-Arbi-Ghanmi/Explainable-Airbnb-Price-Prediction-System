@@ -276,20 +276,12 @@ else:
     }
 
     with st.sidebar.expander("Advanced (optional)", expanded=False):
-        instant_bookable = st.sidebar.selectbox("Instant bookable", ["t", "f"])
-        host_is_superhost = st.sidebar.selectbox("Host is superhost", ["t", "f"])
-        host_identity_verified = st.sidebar.selectbox("Host identity verified", ["t", "f"])
-        host_has_profile_pic = st.sidebar.selectbox("Host has profile pic", ["t", "f"])
-        has_availability = st.sidebar.selectbox("Has availability", ["t", "f"])
-        host_response_time = st.sidebar.selectbox("Host response time", resp_time_options) if resp_time_options else None
-
-    if "instant_bookable" not in locals():
-        instant_bookable = "t"
-        host_is_superhost = "f"
-        host_identity_verified = "t"
-        host_has_profile_pic = "t"
-        has_availability = "t"
-        host_response_time = None
+        instant_bookable = st.selectbox("Instant bookable", ["t", "f"])
+        host_is_superhost = st.selectbox("Host is superhost", ["t", "f"])
+        host_identity_verified = st.selectbox("Host identity verified", ["t", "f"])
+        host_has_profile_pic = st.selectbox("Host has profile pic", ["t", "f"])
+        has_availability = st.selectbox("Has availability", ["t", "f"])
+        host_response_time = st.selectbox("Host response time", resp_time_options) if resp_time_options else None
 
     row = {
         "neighbourhood_cleansed": neigh,
