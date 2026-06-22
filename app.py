@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import folium
+from branca.colormap import LinearColormap
 from streamlit_folium import st_folium
 import re
 import altair as alt
@@ -446,20 +447,44 @@ with tab_map:
     else:
         map_df["price_clip"] = 0
 
+    min_p = float(map_df["price_clip"].min())
+    max_p = float(map_df["price_clip"].max())
+    colormap = LinearColormap(
+        ["green", "yellow", "red"], vmin=min_p, vmax=max_p, caption="Nightly price (€)"
+    )
+    map_df = map_df.copy()
+    map_df["color"] = map_df["price_clip"].apply(colormap)
+
     m = folium.Map(
         location=[map_df["latitude"].mean(), map_df["longitude"].mean()],
         zoom_start=12,
         tiles="OpenStreetMap"
     )
+    colormap.add_to(m)
 
-    for lat_i, lon_i, p_i in zip(map_df["latitude"], map_df["longitude"], map_df["price_clip"]):
-        folium.CircleMarker(
-            location=[lat_i, lon_i],
-            radius=3,
-            fill=True,
-            fill_opacity=0.45,
-            popup=f"€{p_i:.0f}/night (clipped)",
-        ).add_to(m)
+    geo_data = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [row.longitude, row.latitude]},
+                "properties": {"price": int(row.price_clip), "color": row.color},
+            }
+            for row in map_df.itertuples()
+        ],
+    }
+
+    folium.GeoJson(
+        geo_data,
+        marker=folium.CircleMarker(radius=4, fill=True),
+        style_function=lambda f: {
+            "fillColor": f["properties"]["color"],
+            "color": f["properties"]["color"],
+            "fillOpacity": 0.6,
+            "weight": 0,
+        },
+        tooltip=folium.GeoJsonTooltip(fields=["price"], aliases=["€/night"]),
+    ).add_to(m)
 
     if selected_lat is not None and selected_lon is not None and pred_price is not None:
         folium.Marker(
