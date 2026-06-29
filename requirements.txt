@@ -6,3 +6,5 @@ streamlit==1.40.1
 altair==5.4.1
 folium==0.18.0
 streamlit-folium==0.22.1
+shap==0.44.1
+branca==0.8.0
