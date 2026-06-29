@@ -153,8 +153,11 @@ def shap_explanation(model, X_one: pd.DataFrame, meta: dict) -> pd.DataFrame:
 # Load assets
 # -------------------------
 @st.cache_data
-def load_data(path="listings.csv"):
-    return pd.read_csv(path)
+def load_data():
+    from pathlib import Path
+    if Path("listings.csv").exists():
+        return pd.read_csv("listings.csv"), False
+    return pd.read_csv("listings_sample.csv"), True
 
 @st.cache_resource
 def load_model(path="airbnb_barcelona_price_model.joblib"):
@@ -182,10 +185,13 @@ st.caption("Predict nightly price, explore city price patterns, and explain each
 # -------------------------
 # Load everything
 # -------------------------
-df = load_data("listings.csv")
+df, using_sample = load_data()
 meta = load_meta()
 model = load_model()
 imp_df = load_importance()
+
+if using_sample:
+    st.info("Running on a 3,000-listing sample. Download the full dataset with `python download_data.py` for complete map and analysis views.")
 
 df_feat = engineer_features(df)
 
