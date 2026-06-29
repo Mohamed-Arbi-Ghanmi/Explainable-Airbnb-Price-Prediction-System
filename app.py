@@ -402,12 +402,12 @@ with tab_predict:
                 bar_df = bar_df.sort_values("delta_price_eur")
 
                 bar = alt.Chart(bar_df).mark_bar().encode(
-                    x=alt.X("delta_price_eur:Q", title="Δ Predicted price (€) when feature is increased"),
+                    x=alt.X("delta_price_eur:Q", title="Contribution to predicted price (€) vs average listing"),
                     y=alt.Y("feature:N", sort=None, title=""),
                     color=alt.Color("impact_sign:N", legend=alt.Legend(title="Effect")),
                     tooltip=[
                         alt.Tooltip("feature:N"),
-                        alt.Tooltip("delta_price_eur:Q", format="+.2f", title="Δ price (€)"),
+                        alt.Tooltip("delta_price_eur:Q", format="+.2f", title="Contribution (€)"),
                         alt.Tooltip("contribution_pct:Q", format=".1f", title="Contribution (%)")
                     ]
                 ).properties(height=360)
@@ -421,11 +421,15 @@ with tab_predict:
                 st.info("No numeric features available.")
             else:
                 table_df = expl.copy()
-                table_df["delta_price_eur"] = table_df["delta_price_eur"].map(lambda x: f"{x:+.2f} €")
-                table_df["contribution_pct"] = table_df["contribution_pct"].map(lambda x: f"{x:.1f}%")
+                table_df = table_df.rename(columns={
+                    "delta_price_eur": "vs avg (€)",
+                    "contribution_pct": "share (%)",
+                })
+                table_df["vs avg (€)"] = table_df["vs avg (€)"].map(lambda x: f"{x:+.2f} €")
+                table_df["share (%)"] = table_df["share (%)"].map(lambda x: f"{x:.1f}%")
 
                 st.dataframe(
-                    table_df[["feature", "direction", "delta_price_eur", "contribution_pct"]],
+                    table_df[["feature", "direction", "vs avg (€)", "share (%)"]],
                     use_container_width=True,
                     hide_index=True
                 )
