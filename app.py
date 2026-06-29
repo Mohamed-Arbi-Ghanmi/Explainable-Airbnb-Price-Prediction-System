@@ -8,6 +8,7 @@ from branca.colormap import LinearColormap
 from streamlit_folium import st_folium
 import re
 import altair as alt
+import shap
 
 st.set_page_config(page_title="Airbnb Barcelona Price Predictor", layout="wide")
 
@@ -103,44 +104,50 @@ def safe_median(series: pd.Series, fallback: float):
         return float(fallback)
 
 # -------------------------
-# Local explanation (what-if sensitivity) — SHAP replacement
+# SHAP explanation
 # -------------------------
-def local_sensitivity(model, X_one: pd.DataFrame, features: list) -> pd.DataFrame:
-    """
-    Local price decomposition via what-if perturbation:
-    - Slightly increase each numeric feature
-    - Measure change in predicted price (€)
-    - Convert to % contribution based on absolute effects
-    """
-    base_log = float(model.predict(X_one)[0])
-    base_price = float(np.expm1(base_log))
+@st.cache_resource
+def get_shap_explainer(_model):
+    return shap.TreeExplainer(_model[-1])
 
-    effects = []
-    for f in features:
-        if f not in X_one.columns:
-            continue
-        if pd.api.types.is_numeric_dtype(X_one[f]):
-            x = float(X_one[f].iloc[0]) if pd.notna(X_one[f].iloc[0]) else 0.0
+def shap_explanation(model, X_one: pd.DataFrame, meta: dict) -> pd.DataFrame:
+    preprocessor = model[:-1]
+    X_proc = preprocessor.transform(X_one)
 
-            # Adaptive perturbation: +10% or +1 (whichever larger)
-            delta = max(abs(x) * 0.10, 1.0)
+    try:
+        raw_names = preprocessor.get_feature_names_out()
+    except Exception:
+        raw_names = [f"f{i}" for i in range(X_proc.shape[1])]
 
-            x2 = X_one.copy()
-            x2[f] = x + delta
+    explainer = get_shap_explainer(model)
+    shap_vals = explainer.shap_values(X_proc)[0]
 
-            p2 = float(np.expm1(model.predict(x2)[0]))
-            effects.append({"feature": f, "delta_price_eur": p2 - base_price})
+    # Sum OHE dummy columns back to their original feature
+    agg = {}
+    for raw_name, sv in zip(raw_names, shap_vals):
+        stripped = raw_name.split("__", 1)[-1] if "__" in raw_name else raw_name
+        orig = next(
+            (f for f in meta["features"] if stripped == f or stripped.startswith(f + "_")),
+            stripped,
+        )
+        agg[orig] = agg.get(orig, 0.0) + float(sv)
 
-    out = pd.DataFrame(effects)
-    if out.empty:
-        return out
+    base_price = float(np.expm1(float(explainer.expected_value)))
+    rows = [
+        {
+            "feature": feat,
+            "delta_price_eur": base_price * (np.exp(sv) - 1),
+            "direction": "Increase ↑" if sv >= 0 else "Decrease ↓",
+            "contribution_pct": abs(sv),
+        }
+        for feat, sv in agg.items()
+    ]
 
-    out["abs"] = out["delta_price_eur"].abs()
-    total = out["abs"].sum() if out["abs"].sum() != 0 else 1.0
-    out["contribution_pct"] = 100 * out["abs"] / total
-    out["direction"] = np.where(out["delta_price_eur"] >= 0, "Increase ↑", "Decrease ↓")
-    out = out.sort_values("abs", ascending=False).drop(columns=["abs"])
-    return out
+    df = pd.DataFrame(rows)
+    total = df["contribution_pct"].sum() or 1.0
+    df["contribution_pct"] = 100 * df["contribution_pct"] / total
+    df = df.sort_values("contribution_pct", ascending=False)
+    return df
 
 # -------------------------
 # Load assets
@@ -338,7 +345,7 @@ with tab_predict:
         pred_price = float(np.expm1(pred_log))
 
         # compute explanation ONCE
-        expl = local_sensitivity(model, X_one, meta["features"]).head(12)
+        expl = shap_explanation(model, X_one, meta).head(12)
 
         # -------- ROW 1: Prediction | Donut --------
         r1c1, r1c2 = st.columns([1, 1])
@@ -424,7 +431,7 @@ with tab_predict:
                 )
 
         st.caption(
-            "Local explanation = what-if analysis: we slightly increase each numeric feature (10% or +1) and observe how the prediction changes."
+            "Local explanation via SHAP (TreeExplainer): values show each feature's contribution to the prediction relative to the dataset average."
         )
 
 
