@@ -29,7 +29,7 @@ A machine learning web application that predicts nightly Airbnb prices in Barcel
 
 - **ML:** scikit-learn (`HistGradientBoostingRegressor`), SHAP (`TreeExplainer`)
 - **App:** Streamlit, Altair, Folium
-- **Data:** [Inside Airbnb](https://insideairbnb.com/get-the-data/) — Barcelona listings (19,410 rows, 79 features)
+- **Data:** [Inside Airbnb](https://insideairbnb.com/get-the-data/) — Barcelona listings
 
 ---
 
@@ -61,11 +61,13 @@ pip install -r requirements.txt
 ```
 
 **3. Download the dataset**
-
-Edit `download_data.py` — paste the Barcelona `listings.csv.gz` URL from [insideairbnb.com/get-the-data](https://insideairbnb.com/get-the-data/), then run:
 ```bash
 python download_data.py
 ```
+
+This downloads the March 2026 Barcelona scrape from Inside Airbnb (~8MB). To use a different scrape date, update the `URL` variable in `download_data.py` before running.
+
+> **Note on dataset versions:** The model was trained on the September 2024 scrape (19,410 listings, 79 columns). The pre-configured URL points to the March 2026 scrape which may have a different number of listings and slightly different price distributions. The column structure is expected to be the same, so predictions and feature engineering should work correctly — but market statistics in the Analysis tab will reflect current data rather than training data.
 
 **4. Launch the app**
 ```bash
@@ -79,12 +81,12 @@ streamlit run app.py
 ## Project structure
 
 ```
-├── app.py                              # Streamlit application
-├── projet_maha.ipynb                   # ML pipeline: EDA → training → serialization
-├── airbnb_barcelona_price_model.joblib # Trained model
-├── airbnb_barcelona_model_metadata.json
-├── permutation_importance.csv
-├── listings_sample.csv                 # 3,000-row sample for deployment
-├── download_data.py                    # Script to download full dataset
+├── app.py                               # Streamlit application
+├── training_pipeline.ipynb              # ML pipeline: EDA → training → serialization
+├── airbnb_barcelona_price_model.joblib  # Trained sklearn pipeline (preprocessing + model)
+├── airbnb_barcelona_model_metadata.json # Feature names and target variable info
+├── permutation_importance.csv           # Global feature importance scores
+├── listings_sample.csv                  # 3,000-row sample used in cloud deployment
+├── download_data.py                     # Script to download the full dataset locally
 └── requirements.txt
 ```
