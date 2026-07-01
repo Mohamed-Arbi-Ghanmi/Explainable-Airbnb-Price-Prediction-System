@@ -350,18 +350,19 @@ with tab_predict:
         pred_log = float(model.predict(X_one)[0])
         pred_price = float(np.expm1(pred_log))
 
-        # compute explanation ONCE
-        expl = shap_explanation(model, X_one, meta).head(12)
+        # track input fingerprint to detect when inputs change
+        input_key = str(X_one.values.tolist())
 
-        # -------- ROW 1: Prediction | Donut --------
-        r1c1, r1c2 = st.columns([1, 1])
+        # -------- Prediction --------
+        st.subheader("Prediction")
+        col_price, col_compare = st.columns([1, 1])
 
-        with r1c1:
-            st.subheader("Prediction")
+        with col_price:
             st.metric("Predicted nightly price", f"€{pred_price:,.2f}")
 
+        with col_compare:
             actual_price = st.number_input(
-                "Optional: enter an actual host price (€) to compare",
+                "Optional: enter actual host price (€) to compare",
                 min_value=0.0, value=0.0, step=5.0
             )
             if actual_price > 0:
@@ -373,59 +374,76 @@ with tab_predict:
                 else:
                     st.success(f"Fairly priced ({pct_diff:.1f}%)")
 
-        with r1c2:
-            st.subheader("Contribution share (%)")
-            if expl.empty:
-                st.info("No numeric features available.")
-            else:
-                donut_df = expl.copy()
-                donut_df["contribution_pct"] = donut_df["contribution_pct"].round(1)
-
-                donut = alt.Chart(donut_df).mark_arc(innerRadius=60).encode(
-                    theta=alt.Theta("contribution_pct:Q"),
-                    color=alt.Color("feature:N", legend=alt.Legend(title="Feature")),
-                    tooltip=[
-                        alt.Tooltip("feature:N"),
-                        alt.Tooltip("contribution_pct:Q", format=".1f", title="Contribution (%)"),
-                        alt.Tooltip("delta_price_eur:Q", format="+.2f", title="Δ price (€)")
-                    ]
-                ).properties(height=320)
-
-                st.altair_chart(donut, use_container_width=True)
-
         st.divider()
 
-        # -------- ROW 2: Bar | Table --------
-        r2c1, r2c2 = st.columns([1.25, 1])
+        # -------- SHAP explanation (on demand) --------
+        st.subheader("Explanation")
 
-        with r2c1:
-            st.subheader("Impact on predicted price (€)")
-            if expl.empty:
-                st.info("No numeric features available.")
-            else:
-                bar_df = expl.copy()
-                bar_df["impact_sign"] = np.where(bar_df["delta_price_eur"] >= 0, "Push ↑", "Push ↓")
-                bar_df = bar_df.sort_values("delta_price_eur")
+        # invalidate stored explanation when inputs change
+        if st.session_state.get("shap_input_key") != input_key:
+            st.session_state.pop("shap_result", None)
 
-                bar = alt.Chart(bar_df).mark_bar().encode(
-                    x=alt.X("delta_price_eur:Q", title="Contribution to predicted price (€) vs average listing"),
-                    y=alt.Y("feature:N", sort=None, title=""),
-                    color=alt.Color("impact_sign:N", legend=alt.Legend(title="Effect")),
-                    tooltip=[
-                        alt.Tooltip("feature:N"),
-                        alt.Tooltip("delta_price_eur:Q", format="+.2f", title="Contribution (€)"),
-                        alt.Tooltip("contribution_pct:Q", format=".1f", title="Contribution (%)")
-                    ]
-                ).properties(height=360)
+        if "shap_result" not in st.session_state:
+            st.info("Adjust your listing inputs above, then click the button to explain the prediction.")
+            if st.button("Explain this prediction →"):
+                with st.spinner("Computing SHAP explanation — this takes a few seconds..."):
+                    st.session_state["shap_result"] = shap_explanation(model, X_one, meta).head(12)
+                    st.session_state["shap_input_key"] = input_key
+                st.rerun()
+        else:
+            expl = st.session_state["shap_result"]
 
-                zero_line = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule().encode(x="x:Q")
-                st.altair_chart(bar + zero_line, use_container_width=True)
+            if st.button("Re-explain with current inputs →"):
+                with st.spinner("Computing SHAP explanation — this takes a few seconds..."):
+                    st.session_state["shap_result"] = shap_explanation(model, X_one, meta).head(12)
+                    st.session_state["shap_input_key"] = input_key
+                st.rerun()
 
-        with r2c2:
-            st.subheader("Top local drivers")
-            if expl.empty:
-                st.info("No numeric features available.")
-            else:
+            # -------- ROW 1: Donut | Bar --------
+            r1c1, r1c2 = st.columns([1, 1.25])
+
+            with r1c1:
+                st.markdown("**Contribution share (%)**")
+                if not expl.empty:
+                    donut_df = expl.copy()
+                    donut_df["contribution_pct"] = donut_df["contribution_pct"].round(1)
+
+                    donut = alt.Chart(donut_df).mark_arc(innerRadius=60).encode(
+                        theta=alt.Theta("contribution_pct:Q"),
+                        color=alt.Color("feature:N", legend=alt.Legend(title="Feature")),
+                        tooltip=[
+                            alt.Tooltip("feature:N"),
+                            alt.Tooltip("contribution_pct:Q", format=".1f", title="Contribution (%)"),
+                            alt.Tooltip("delta_price_eur:Q", format="+.2f", title="vs avg (€)")
+                        ]
+                    ).properties(height=320)
+
+                    st.altair_chart(donut, use_container_width=True)
+
+            with r1c2:
+                st.markdown("**Impact vs average listing (€)**")
+                if not expl.empty:
+                    bar_df = expl.copy()
+                    bar_df["impact_sign"] = np.where(bar_df["delta_price_eur"] >= 0, "Push ↑", "Push ↓")
+                    bar_df = bar_df.sort_values("delta_price_eur")
+
+                    bar = alt.Chart(bar_df).mark_bar().encode(
+                        x=alt.X("delta_price_eur:Q", title="Contribution to predicted price (€) vs average listing"),
+                        y=alt.Y("feature:N", sort=None, title=""),
+                        color=alt.Color("impact_sign:N", legend=alt.Legend(title="Effect")),
+                        tooltip=[
+                            alt.Tooltip("feature:N"),
+                            alt.Tooltip("delta_price_eur:Q", format="+.2f", title="Contribution (€)"),
+                            alt.Tooltip("contribution_pct:Q", format=".1f", title="Contribution (%)")
+                        ]
+                    ).properties(height=360)
+
+                    zero_line = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule().encode(x="x:Q")
+                    st.altair_chart(bar + zero_line, use_container_width=True)
+
+            # -------- ROW 2: Table --------
+            st.markdown("**Top local drivers**")
+            if not expl.empty:
                 table_df = expl.copy()
                 table_df = table_df.rename(columns={
                     "delta_price_eur": "vs avg (€)",
@@ -440,9 +458,9 @@ with tab_predict:
                     hide_index=True
                 )
 
-        st.caption(
-            "Local explanation via SHAP (TreeExplainer): values show each feature's contribution to the prediction relative to the dataset average."
-        )
+            st.caption(
+                "Local explanation via SHAP (TreeExplainer): values show each feature's contribution to the prediction relative to the dataset average."
+            )
 
 
 
